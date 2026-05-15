@@ -147,16 +147,33 @@
 </head>
 <body>
     <div class="navbar">
-        <h2>CTI Platform</h2>
-        <div>
-            <a href="/view_assets">View Assets</a>
-            <a href="/register_asset">Register Asset</a>
-            <a href="/logout">Logout</a>
-        </div>
+    <h2>CTI Platform</h2>
+    <div>
+        <a href="/view_assets">View Assets</a>
+        <a href="/register_asset">Register Asset</a>
+        <a href="/upload_csv">Upload CSV</a>
+        <a href="/logout">Logout</a>
     </div>
+</div>
 
     <div class="container">
         <h1>Registered Assets</h1>
+        
+                <form action="/view_assets" method="POST" style="margin-bottom: 20px;">
+            <input 
+                type="text" 
+                name="search" 
+                placeholder="Search by name, type, owner, IP, or OS"
+                value="{{ search_term }}"
+                style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box;"
+            >
+            <button 
+                type="submit" 
+                style="width: 100%; padding: 12px; margin-top: 10px; background-color: #0d6efd; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px;"
+            >
+                Search Assets
+            </button>
+        </form>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}

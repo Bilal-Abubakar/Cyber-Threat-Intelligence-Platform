@@ -1,28 +1,42 @@
 from flask import Flask, render_template, request, redirect, url_for, flash
-import sqlite3
+import csv
+import io
+import mysql.connector
+from mysql.connector import Error
 from flask_login import LoginManager, UserMixin, login_user, login_required, current_user, logout_user
 from werkzeug.security import generate_password_hash, check_password_hash
+
+from database import DB_CONFIG
+
 
 app = Flask(__name__)
 app.secret_key = 'change_this_to_a_strong_secret_key'
 
+# ---------------------------
 # Flask-Login setup
+# ---------------------------
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message = "Please log in to access this page."
 login_manager.login_message_category = "warning"
 
-DATABASE = 'assets.db'
-
 
 # ---------------------------
 # Database helper function
 # ---------------------------
 def get_db_connection():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """
+    Creates a connection to the MySQL database.
+    dictionary=True makes rows accessible like dictionaries:
+    row["username"], row["ip_address"], etc.
+    """
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        return conn
+    except Error as e:
+        print(f"Database connection error: {e}")
+        return None
 
 
 # ---------------------------
@@ -41,72 +55,184 @@ class User(UserMixin):
 @login_manager.user_loader
 def load_user(user_id):
     conn = get_db_connection()
-    user = conn.execute(
-        "SELECT * FROM users WHERE id = ?",
+
+    if conn is None:
+        return None
+
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT * FROM users WHERE id = %s",
         (user_id,)
-    ).fetchone()
+    )
+    user = cursor.fetchone()
+
+    cursor.close()
     conn.close()
 
     if user:
         return User(user["id"], user["username"], user["password_hash"])
+
     return None
 
 
 # ---------------------------
 # Asset database functions
 # ---------------------------
-def insert_asset(name, asset_type, owner, ip_address, os):
+def insert_asset(name, asset_type, owner, ip_address, os, criticality="Medium"):
     conn = get_db_connection()
-    conn.execute(
-        '''
-        INSERT INTO assets (name, asset_type, owner, ip_address, os)
-        VALUES (?, ?, ?, ?, ?)
-        ''',
-        (name, asset_type, owner, ip_address, os)
+
+    if conn is None:
+        return False
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO assets (name, asset_type, owner, ip_address, os, criticality, user_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (name, asset_type, owner, ip_address, os, criticality, current_user.id)
     )
+
     conn.commit()
+    cursor.close()
     conn.close()
+
+    return True
 
 
 def get_all_assets():
     conn = get_db_connection()
-    assets = conn.execute("SELECT * FROM assets").fetchall()
+
+    if conn is None:
+        return []
+
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT *
+        FROM assets
+        ORDER BY created_at DESC
+    """)
+
+    assets = cursor.fetchall()
+
+    cursor.close()
     conn.close()
+
+    return assets
+
+
+def search_assets(search_term):
+    conn = get_db_connection()
+
+    if conn is None:
+        return []
+
+    cursor = conn.cursor(dictionary=True)
+
+    query = """
+        SELECT *
+        FROM assets
+        WHERE name LIKE %s
+        OR asset_type LIKE %s
+        OR owner LIKE %s
+        OR ip_address LIKE %s
+        OR os LIKE %s
+        OR criticality LIKE %s
+        ORDER BY created_at DESC
+    """
+
+    wildcard_term = f"%{search_term}%"
+
+    cursor.execute(
+        query,
+        (
+            wildcard_term,
+            wildcard_term,
+            wildcard_term,
+            wildcard_term,
+            wildcard_term,
+            wildcard_term
+        )
+    )
+
+    assets = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
     return assets
 
 
 def get_asset_by_id(asset_id):
     conn = get_db_connection()
-    asset = conn.execute(
-        "SELECT * FROM assets WHERE id = ?",
+
+    if conn is None:
+        return None
+
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute(
+        "SELECT * FROM assets WHERE id = %s",
         (asset_id,)
-    ).fetchone()
+    )
+
+    asset = cursor.fetchone()
+
+    cursor.close()
     conn.close()
+
     return asset
 
 
-def update_asset(asset_id, name, asset_type, owner, ip_address, os):
+def update_asset(asset_id, name, asset_type, owner, ip_address, os, criticality):
     conn = get_db_connection()
-    conn.execute(
-        '''
+
+    if conn is None:
+        return False
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
         UPDATE assets
-        SET name = ?, asset_type = ?, owner = ?, ip_address = ?, os = ?
-        WHERE id = ?
-        ''',
-        (name, asset_type, owner, ip_address, os, asset_id)
+        SET name = %s,
+            asset_type = %s,
+            owner = %s,
+            ip_address = %s,
+            os = %s,
+            criticality = %s
+        WHERE id = %s
+        """,
+        (name, asset_type, owner, ip_address, os, criticality, asset_id)
     )
+
     conn.commit()
+    cursor.close()
     conn.close()
+
+    return True
 
 
 def delete_asset(asset_id):
     conn = get_db_connection()
-    conn.execute(
-        "DELETE FROM assets WHERE id = ?",
+
+    if conn is None:
+        return False
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "DELETE FROM assets WHERE id = %s",
         (asset_id,)
     )
+
     conn.commit()
+    cursor.close()
     conn.close()
+
+    return True
 
 
 # ---------------------------
@@ -116,6 +242,7 @@ def delete_asset(asset_id):
 def home():
     if current_user.is_authenticated:
         return redirect(url_for('view_assets'))
+
     return redirect(url_for('login'))
 
 
@@ -133,23 +260,35 @@ def register():
             return redirect(url_for('register'))
 
         conn = get_db_connection()
-        existing_user = conn.execute(
-            "SELECT * FROM users WHERE username = ?",
+
+        if conn is None:
+            flash("Database connection failed.", "danger")
+            return redirect(url_for('register'))
+
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute(
+            "SELECT * FROM users WHERE username = %s",
             (username,)
-        ).fetchone()
+        )
+
+        existing_user = cursor.fetchone()
 
         if existing_user:
+            cursor.close()
             conn.close()
             flash("Username already exists. Please choose another one.", "warning")
             return redirect(url_for('register'))
 
         password_hash = generate_password_hash(password)
 
-        conn.execute(
-            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+        cursor.execute(
+            "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
             (username, password_hash)
         )
+
         conn.commit()
+        cursor.close()
         conn.close()
 
         flash("Registration successful! Please log in.", "success")
@@ -168,19 +307,30 @@ def login():
         password = request.form['password'].strip()
 
         conn = get_db_connection()
-        user = conn.execute(
-            "SELECT * FROM users WHERE username = ?",
+
+        if conn is None:
+            flash("Database connection failed.", "danger")
+            return redirect(url_for('login'))
+
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute(
+            "SELECT * FROM users WHERE username = %s",
             (username,)
-        ).fetchone()
+        )
+
+        user = cursor.fetchone()
+
+        cursor.close()
         conn.close()
 
         if user and check_password_hash(user["password_hash"], password):
             login_user(User(user["id"], user["username"], user["password_hash"]))
             flash("Login successful!", "success")
             return redirect(url_for('view_assets'))
-        else:
-            flash("Invalid username or password. Please try again.", "danger")
-            return redirect(url_for('login'))
+
+        flash("Invalid username or password. Please try again.", "danger")
+        return redirect(url_for('login'))
 
     return render_template('login.html')
 
@@ -208,26 +358,120 @@ def register_asset():
         owner = request.form['owner'].strip()
         ip_address = request.form['ip_address'].strip()
         os = request.form['os'].strip()
+        criticality = request.form.get('criticality', 'Medium').strip()
 
-        if not name or not asset_type or not owner or not ip_address or not os:
-            flash("All asset fields are required.", "danger")
+        if not name or not asset_type or not owner or not ip_address:
+            flash("Name, asset type, owner, and IP address are required.", "danger")
             return redirect(url_for('register_asset'))
 
-        insert_asset(name, asset_type, owner, ip_address, os)
-        flash('Asset registered successfully!', 'success')
-        return redirect(url_for('view_assets'))
+        success = insert_asset(name, asset_type, owner, ip_address, os, criticality)
+
+        if success:
+            flash('Asset registered successfully!', 'success')
+            return redirect(url_for('view_assets'))
+
+        flash("Failed to register asset.", "danger")
+        return redirect(url_for('register_asset'))
 
     return render_template('register_asset.html')
 
 
 # ---------------------------
+# CSV upload route
+# ---------------------------
+@app.route('/upload_csv', methods=['GET', 'POST'])
+@login_required
+def upload_csv():
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            flash("No file part found.", "danger")
+            return redirect(url_for('upload_csv'))
+
+        file = request.files['file']
+
+        if file.filename == '':
+            flash("Please choose a CSV file.", "warning")
+            return redirect(url_for('upload_csv'))
+
+        if not file.filename.lower().endswith('.csv'):
+            flash("Only CSV files are allowed.", "danger")
+            return redirect(url_for('upload_csv'))
+
+        try:
+            stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
+            csv_reader = csv.DictReader(stream)
+
+            required_columns = ['name', 'asset_type', 'owner', 'ip_address', 'os']
+
+            if csv_reader.fieldnames is None:
+                flash("CSV file is empty or invalid.", "danger")
+                return redirect(url_for('upload_csv'))
+
+            missing_columns = [col for col in required_columns if col not in csv_reader.fieldnames]
+
+            if missing_columns:
+                flash(f"Missing required columns: {', '.join(missing_columns)}", "danger")
+                return redirect(url_for('upload_csv'))
+
+            count = 0
+
+            for row in csv_reader:
+                name = row['name'].strip()
+                asset_type = row['asset_type'].strip()
+                owner = row['owner'].strip()
+                ip_address = row['ip_address'].strip()
+                os_name = row['os'].strip()
+                criticality = row.get('criticality', 'Medium').strip() or 'Medium'
+
+                if name and asset_type and owner and ip_address:
+                    success = insert_asset(
+                        name,
+                        asset_type,
+                        owner,
+                        ip_address,
+                        os_name,
+                        criticality
+                    )
+
+                    if success:
+                        count += 1
+
+            flash(f"{count} assets uploaded successfully!", "success")
+            return redirect(url_for('view_assets'))
+
+        except Exception as e:
+            flash(f"Error processing CSV file: {str(e)}", "danger")
+            return redirect(url_for('upload_csv'))
+
+    return render_template('upload_csv.html')
+
+
+# ---------------------------
 # View assets route
 # ---------------------------
-@app.route('/view_assets')
+@app.route('/view_assets', methods=['GET', 'POST'])
 @login_required
 def view_assets():
+    if request.method == 'POST':
+        search_term = request.form['search'].strip()
+        assets = search_assets(search_term)
+
+        if not assets:
+            flash("No matching assets found.", "warning")
+
+        return render_template(
+            'view_assets.html',
+            assets=assets,
+            search_term=search_term
+        )
+
     assets = get_all_assets()
-    return render_template('view_assets.html', assets=assets)
+
+    return render_template(
+        'view_assets.html',
+        assets=assets,
+        search_term=''
+    )
 
 
 # ---------------------------
@@ -248,14 +492,28 @@ def edit_asset(asset_id):
         owner = request.form['owner'].strip()
         ip_address = request.form['ip_address'].strip()
         os = request.form['os'].strip()
+        criticality = request.form.get('criticality', 'Medium').strip()
 
-        if not name or not asset_type or not owner or not ip_address or not os:
-            flash("All asset fields are required.", "danger")
+        if not name or not asset_type or not owner or not ip_address:
+            flash("Name, asset type, owner, and IP address are required.", "danger")
             return redirect(url_for('edit_asset', asset_id=asset_id))
 
-        update_asset(asset_id, name, asset_type, owner, ip_address, os)
-        flash('Asset updated successfully!', 'success')
-        return redirect(url_for('view_assets'))
+        success = update_asset(
+            asset_id,
+            name,
+            asset_type,
+            owner,
+            ip_address,
+            os,
+            criticality
+        )
+
+        if success:
+            flash('Asset updated successfully!', 'success')
+            return redirect(url_for('view_assets'))
+
+        flash("Failed to update asset.", "danger")
+        return redirect(url_for('edit_asset', asset_id=asset_id))
 
     return render_template('edit_asset.html', asset=asset)
 
@@ -272,8 +530,13 @@ def delete_asset_route(asset_id):
         flash("Asset not found.", "danger")
         return redirect(url_for('view_assets'))
 
-    delete_asset(asset_id)
-    flash('Asset deleted successfully!', 'success')
+    success = delete_asset(asset_id)
+
+    if success:
+        flash('Asset deleted successfully!', 'success')
+    else:
+        flash("Failed to delete asset.", "danger")
+
     return redirect(url_for('view_assets'))
 
 

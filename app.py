@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, flash
 import csv
 import io
+import nmap
 import mysql.connector
 from mysql.connector import Error
 from flask_login import LoginManager, UserMixin, login_user, login_required, current_user, logout_user
@@ -11,6 +12,7 @@ from database import DB_CONFIG
 
 app = Flask(__name__)
 app.secret_key = 'change_this_to_a_strong_secret_key'
+
 
 # ---------------------------
 # Flask-Login setup
@@ -26,11 +28,6 @@ login_manager.login_message_category = "warning"
 # Database helper function
 # ---------------------------
 def get_db_connection():
-    """
-    Creates a connection to the MySQL database.
-    dictionary=True makes rows accessible like dictionaries:
-    row["username"], row["ip_address"], etc.
-    """
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         return conn
@@ -186,6 +183,27 @@ def get_asset_by_id(asset_id):
     return asset
 
 
+def get_asset_by_ip(ip_address):
+    conn = get_db_connection()
+
+    if conn is None:
+        return None
+
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute(
+        "SELECT * FROM assets WHERE ip_address = %s LIMIT 1",
+        (ip_address,)
+    )
+
+    asset = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    return asset
+
+
 def update_asset(asset_id, name, asset_type, owner, ip_address, os, criticality):
     conn = get_db_connection()
 
@@ -226,6 +244,30 @@ def delete_asset(asset_id):
     cursor.execute(
         "DELETE FROM assets WHERE id = %s",
         (asset_id,)
+    )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return True
+
+
+def insert_asset_service(asset_id, port, protocol, service_name, service_version, product):
+    conn = get_db_connection()
+
+    if conn is None:
+        return False
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO asset_services 
+        (asset_id, port, protocol, service_name, service_version, product)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (asset_id, port, protocol, service_name, service_version, product)
     )
 
     conn.commit()
@@ -516,6 +558,117 @@ def edit_asset(asset_id):
         return redirect(url_for('edit_asset', asset_id=asset_id))
 
     return render_template('edit_asset.html', asset=asset)
+
+
+# ---------------------------
+# Network scan route
+# ---------------------------
+@app.route('/network_scan', methods=['GET', 'POST'])
+@login_required
+def network_scan():
+    if request.method == 'POST':
+        target_range = request.form['target_range'].strip()
+        scan_type = request.form.get('scan_type', 'quick')
+
+        if not target_range:
+            flash("Please enter a target IP address or network range.", "danger")
+            return redirect(url_for('network_scan'))
+
+        try:
+            scanner = nmap.PortScanner()
+
+            if scan_type == "quick":
+                scan_arguments = "-sn -T4"
+            else:
+                scan_arguments = "-sV -T4"
+
+            scanner.scan(hosts=target_range, arguments=scan_arguments)
+
+            discovered_count = 0
+            duplicate_count = 0
+            service_count = 0
+
+            for host in scanner.all_hosts():
+                host_state = scanner[host].state()
+
+                if host_state != "up":
+                    continue
+
+                ip_address = host
+                existing_asset = get_asset_by_ip(ip_address)
+
+                if existing_asset:
+                    asset_id = existing_asset["id"]
+                    duplicate_count += 1
+                else:
+                    os_name = "Unknown"
+                    asset_name = f"Discovered Host - {host}"
+                    asset_type = "Network Device"
+                    owner = "Unassigned"
+                    criticality = "Medium"
+
+                    success = insert_asset(
+                        asset_name,
+                        asset_type,
+                        owner,
+                        ip_address,
+                        os_name,
+                        criticality
+                    )
+
+                    if not success:
+                        continue
+
+                    discovered_count += 1
+
+                    new_asset = get_asset_by_ip(ip_address)
+
+                    if not new_asset:
+                        continue
+
+                    asset_id = new_asset["id"]
+
+                if scan_type == "detailed":
+                    for protocol in scanner[host].all_protocols():
+                        ports = scanner[host][protocol].keys()
+
+                        for port in ports:
+                            port_data = scanner[host][protocol][port]
+
+                            service_name = port_data.get('name', 'unknown')
+                            product = port_data.get('product', '')
+                            service_version = port_data.get('version', '')
+
+                            service_saved = insert_asset_service(
+                                asset_id,
+                                port,
+                                protocol,
+                                service_name,
+                                service_version,
+                                product
+                            )
+
+                            if service_saved:
+                                service_count += 1
+
+            if scan_type == "quick":
+                flash(
+                    f"Quick scan completed. {discovered_count} new assets discovered. {duplicate_count} existing assets skipped.",
+                    "success"
+                )
+            else:
+                flash(
+                    f"Detailed scan completed. {discovered_count} new assets discovered, {duplicate_count} existing assets skipped, and {service_count} services discovered.",
+                    "success"
+                )
+
+            return redirect(url_for('view_assets'))
+
+        except Exception as e:
+            flash(f"Network scan failed: {str(e)}", "danger")
+            return redirect(url_for('network_scan'))
+
+    return render_template('network_scan.html')
 
 
 # ---------------------------
